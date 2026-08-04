@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_USER: revscope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-revscope}
+      POSTGRES_DB: revscope
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U revscope"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://revscope:${POSTGRES_PASSWORD:-revscope}@db:5432/revscope
+      AUTH_MODE: ${AUTH_MODE:-none}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
