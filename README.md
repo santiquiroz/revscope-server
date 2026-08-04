@@ -4,6 +4,13 @@ Servidor open source y **auto-hosteable** para [RevScope](https://github.com/san
 
 La app funciona 100% offline sin este servidor. Esto agrega la capa social/colaborativa, y **tú eliges a qué servidor apuntar** desde Ajustes: el público, el de tu grupo de rodada, o el tuyo en una Raspberry.
 
+## Principios de diseño (contrato con la app)
+
+1. **Offline-first, siempre.** La app es completamente funcional sin servidor. Todo lo que este servidor agrega es *aditivo*: si no hay red o el server está caído, la app se comporta exactamente igual que sin servidor configurado.
+2. **Fallo silencioso.** Un server inalcanzable jamás produce errores visibles ni bloquea nada — como mucho, un indicador discreto de "sin sincronizar".
+3. **Sync oportunista.** Los huecos se suben cuando se puede y se cachean localmente los descargados; la fuente de verdad local nunca depende del server.
+4. **El usuario elige su server.** URL configurable en Ajustes; el público es solo un default.
+
 ## Features
 
 | Feature | Qué hace |
