@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from . import db
-from .routers import ghosts, potholes, rooms
+from .routers import ghosts, potholes, rooms, zone
 
 
 @asynccontextmanager
@@ -22,6 +22,7 @@ app = FastAPI(
 app.include_router(potholes.router)
 app.include_router(rooms.router)
 app.include_router(ghosts.router)
+app.include_router(zone.router)
 
 
 @app.get("/healthz")

@@ -12,6 +12,7 @@ def test_routes_registered():
     assert "/v1/rooms" in paths
     assert "/v1/ghosts" in paths
     assert "/v1/ghosts/{ghost_id}" in paths
+    assert "/v1/zone-brief" in paths
 
 
 def test_default_settings_are_lan_friendly():

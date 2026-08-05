@@ -23,6 +23,15 @@ CREATE TABLE IF NOT EXISTS ghosts (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ghosts_finish_idx ON ghosts USING GIST (finish_geom);
+
+CREATE TABLE IF NOT EXISTS zone_briefs (
+    place_key    TEXT PRIMARY KEY,
+    place_label  TEXT NOT NULL,
+    country      TEXT,
+    body         TEXT NOT NULL,
+    contributors INT NOT NULL DEFAULT 1,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 pool: asyncpg.Pool | None = None
