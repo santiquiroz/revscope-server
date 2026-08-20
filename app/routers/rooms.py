@@ -109,13 +109,19 @@ def _room_unavailable(room: dict | None) -> bool:
     return room is None or len(room["members"]) >= MAX_ROOM_SIZE
 
 
-async def _authenticate_ws(websocket: WebSocket, rider: str, settings: Settings) -> bool:
+async def _resolve_ws_rider_name(websocket: WebSocket, rider: str, settings: Settings) -> str | None:
+    """Valida el handshake y devuelve el nombre final del member, o None si falla el auth.
+
+    En modos autenticados (token/oidc) el nombre sale de la identidad validada, no
+    del cliente — el `?rider=` de la query es solo el fallback autodeclarado del
+    modo none, así un JWT válido no puede hacerse pasar por otro nombre.
+    """
     try:
-        await get_ws_identity(websocket.headers, settings, rider)
+        identity = await get_ws_identity(websocket.headers, settings, rider)
     except HTTPException:
         await websocket.close(code=WS_AUTH_FAILED_CLOSE_CODE)
-        return False
-    return True
+        return None
+    return (identity.display_name or rider)[:32]
 
 
 @router.websocket("/{code}/ws")
@@ -131,12 +137,13 @@ async def room_ws(
         return
 
     rider = rider[:32]
-    if not await _authenticate_ws(websocket, rider, settings):
+    resolved_rider = await _resolve_ws_rider_name(websocket, rider, settings)
+    if resolved_rider is None:
         return
 
     await websocket.accept()
     members = room["members"]
-    rider = _unique_rider_name(members, rider)
+    rider = _unique_rider_name(members, resolved_rider)
     members[rider] = websocket
     try:
         await websocket.send_json(_room_state_message(room))

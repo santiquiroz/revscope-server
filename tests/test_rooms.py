@@ -1,14 +1,37 @@
+from contextlib import contextmanager
+
+import pytest
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
+import app.routers.rooms as rooms_module
+from app.auth import Identity
+from app.config import Settings, get_settings
 from app.main import app
 
 client = TestClient(app)
+
+TOKEN_AUTH_SECRET = "secreto-de-prueba-123"
 
 
 def _create_room():
     r = client.post("/v1/rooms", headers={"X-Rider-Name": "ana"})
     assert r.status_code == 200
     return r.json()["code"]
+
+
+@contextmanager
+def _token_auth_mode():
+    """Fuerza auth_mode=token solo para el bloque `with` — la sala se crea
+    afuera, en modo none, para no arrastrar la exigencia de Authorization
+    al setup del test."""
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        auth_mode="token", auth_token=TOKEN_AUTH_SECRET
+    )
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
 
 
 def test_pos_legacy_sin_type_se_relayea():
@@ -62,3 +85,50 @@ def test_nombre_duplicado_gana_sufijo():
             a2.send_json({"lat": 1.0, "lon": 2.0, "speed_kmh": None})
             msg = a.receive_json()
             assert msg["rider"] == "ana-2"
+
+
+def test_ws_sin_authorization_cierra_4401():
+    code = _create_room()
+    with _token_auth_mode():
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana"):
+                pass
+        assert exc_info.value.code == 4401
+
+
+def test_ws_token_equivocado_cierra_4401():
+    code = _create_room()
+    with _token_auth_mode():
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/v1/rooms/{code}/ws?rider=ana",
+                headers={"Authorization": "Bearer token-que-no-es"},
+            ):
+                pass
+        assert exc_info.value.code == 4401
+
+
+def test_ws_token_correcto_conecta_y_recibe_room_state():
+    code = _create_room()
+    with _token_auth_mode():
+        with client.websocket_connect(
+            f"/v1/rooms/{code}/ws?rider=ana",
+            headers={"Authorization": f"Bearer {TOKEN_AUTH_SECRET}"},
+        ) as a:
+            msg = a.receive_json()
+            assert msg["type"] == "room_state"
+
+
+def test_ws_autenticado_usa_nombre_de_identidad_no_el_query_param(monkeypatch):
+    async def _fake_get_ws_identity(headers, settings, self_declared_name):
+        return Identity(subject="sub:carlos", display_name="carlos-real")
+
+    monkeypatch.setattr(rooms_module, "get_ws_identity", _fake_get_ws_identity)
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=impostor") as a:
+        a.receive_json()
+        with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=beto") as b:
+            b.receive_json()
+            a.send_json({"lat": 1.0, "lon": 2.0, "speed_kmh": None})
+            msg = b.receive_json()
+            assert msg["rider"] == "carlos-real"
