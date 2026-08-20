@@ -1,56 +1,158 @@
 """Rodadas en grupo: sala efímera con código + fan-out de posiciones por WebSocket.
 
 Las posiciones NUNCA tocan la base de datos — una rodada es efímera por diseño.
-La sala muere sola cuando sale el último miembro."""
+La sala muere sola cuando sale el último miembro.
+
+Protocolo v2: además de `pos` (compat con clientes viejos, sin `type`), soporta
+`dest` (destino compartido) y `race` (arrancada sincronizada). El estado de sala
+(`dest`/`race` vigentes) se guarda en memoria y se retransmite como `room_state`
+a todo el que se conecta o pide `hello` — así un que llega tarde ve lo que ya
+acordó el grupo."""
 
 import secrets
 import string
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
-from ..auth import Identity, get_identity
+from ..auth import Identity, get_identity, get_ws_identity
+from ..config import Settings, get_settings
 
 router = APIRouter(prefix="/v1/rooms", tags=["rooms"])
 
 CODE_ALPHABET = string.ascii_uppercase.replace("O", "").replace("I", "")
 MAX_ROOM_SIZE = 20
+WS_AUTH_FAILED_CLOSE_CODE = 4401
+WS_ROOM_UNAVAILABLE_CLOSE_CODE = 4004
 
-# code → {rider_name → WebSocket}
-_rooms: dict[str, dict[str, WebSocket]] = {}
+POS_FIELDS = ("lat", "lon", "speed_kmh", "heading_deg")
+DEST_FIELDS = ("lat", "lon", "name")
+RACE_FIELDS = ("action", "start_at_ms")
+
+# code → {"members": {rider: WebSocket}, "state": {"dest": dict|None, "race": dict|None}}
+_rooms: dict[str, dict] = {}
+
+
+def _new_room_state() -> dict:
+    return {"dest": None, "race": None}
 
 
 @router.post("")
 async def create_room(_: Identity = Depends(get_identity)) -> dict:
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(6))
-    _rooms.setdefault(code, {})
+    _rooms.setdefault(code, {"members": {}, "state": _new_room_state()})
     return {"code": code}
 
 
-@router.websocket("/{code}/ws")
-async def room_ws(websocket: WebSocket, code: str, rider: str = "anonimo") -> None:
-    room = _rooms.get(code.upper())
-    if room is None or len(room) >= MAX_ROOM_SIZE:
-        await websocket.close(code=4004)
-        return
-    await websocket.accept()
-    rider = rider[:32]
-    room[rider] = websocket
+def _unique_rider_name(members: dict, base: str) -> str:
+    if base not in members:
+        return base
+    n = 2
+    while f"{base}-{n}" in members:
+        n += 1
+    return f"{base}-{n}"
+
+
+def _room_state_message(room: dict) -> dict:
+    return {"type": "room_state", **room["state"]}
+
+
+def _projected(payload: dict, fields: tuple) -> dict:
+    return {k: payload.get(k) for k in fields}
+
+
+def _build_pos_message(rider: str, payload: dict) -> dict:
+    return {"type": "pos", "rider": rider, **_projected(payload, POS_FIELDS)}
+
+
+def _build_dest_message(rider: str, payload: dict) -> dict:
+    return {"type": "dest", "rider": rider, **_projected(payload, DEST_FIELDS)}
+
+
+def _build_race_message(rider: str, payload: dict) -> dict:
+    return {"type": "race", "rider": rider, **_projected(payload, RACE_FIELDS)}
+
+
+def _apply_dest(room: dict, message: dict) -> None:
+    room["state"]["dest"] = message
+
+
+def _apply_race(room: dict, message: dict, payload: dict) -> None:
+    room["state"]["race"] = message if payload.get("action") == "start" else None
+
+
+def _dispatch(rider: str, room: dict, payload: dict) -> dict | None:
+    mtype = payload.get("type", "pos")
+    if mtype == "pos":
+        return _build_pos_message(rider, payload)
+    if mtype == "dest":
+        message = _build_dest_message(rider, payload)
+        _apply_dest(room, message)
+        return message
+    if mtype == "race":
+        message = _build_race_message(rider, payload)
+        _apply_race(room, message, payload)
+        return message
+    return None
+
+
+async def _broadcast(members: dict, sender: str, message: dict) -> None:
+    for name, peer in list(members.items()):
+        if name == sender:
+            continue
+        try:
+            await peer.send_json(message)
+        except Exception:
+            members.pop(name, None)
+
+
+def _room_unavailable(room: dict | None) -> bool:
+    return room is None or len(room["members"]) >= MAX_ROOM_SIZE
+
+
+async def _authenticate_ws(websocket: WebSocket, rider: str, settings: Settings) -> bool:
     try:
+        await get_ws_identity(websocket.headers, settings, rider)
+    except HTTPException:
+        await websocket.close(code=WS_AUTH_FAILED_CLOSE_CODE)
+        return False
+    return True
+
+
+@router.websocket("/{code}/ws")
+async def room_ws(
+    websocket: WebSocket,
+    code: str,
+    rider: str = "anonimo",
+    settings: Settings = Depends(get_settings),
+) -> None:
+    room = _rooms.get(code.upper())
+    if _room_unavailable(room):
+        await websocket.close(code=WS_ROOM_UNAVAILABLE_CLOSE_CODE)
+        return
+
+    rider = rider[:32]
+    if not await _authenticate_ws(websocket, rider, settings):
+        return
+
+    await websocket.accept()
+    members = room["members"]
+    rider = _unique_rider_name(members, rider)
+    members[rider] = websocket
+    try:
+        await websocket.send_json(_room_state_message(room))
         while True:
-            # La app manda {"lat":…,"lon":…,"speed_kmh":…}; se retransmite tal cual
-            # con el nombre del emisor a todos los demás de la sala.
             payload = await websocket.receive_json()
-            message = {"rider": rider, **{k: payload.get(k) for k in ("lat", "lon", "speed_kmh")}}
-            for name, peer in list(room.items()):
-                if name == rider:
-                    continue
-                try:
-                    await peer.send_json(message)
-                except Exception:
-                    room.pop(name, None)
+            mtype = payload.get("type", "pos")
+            if mtype == "hello":
+                await websocket.send_json(_room_state_message(room))
+                continue
+            message = _dispatch(rider, room, payload)
+            if message is None:
+                continue
+            await _broadcast(members, rider, message)
     except WebSocketDisconnect:
         pass
     finally:
-        room.pop(rider, None)
-        if not room:
+        members.pop(rider, None)
+        if not members:
             _rooms.pop(code.upper(), None)
