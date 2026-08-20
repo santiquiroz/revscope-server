@@ -132,3 +132,75 @@ def test_ws_autenticado_usa_nombre_de_identidad_no_el_query_param(monkeypatch):
             a.send_json({"lat": 1.0, "lon": 2.0, "speed_kmh": None})
             msg = b.receive_json()
             assert msg["rider"] == "carlos-real"
+
+
+def test_dest_se_ecoa_al_emisor():
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana") as a:
+        a.receive_json()
+        with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=beto") as b:
+            b.receive_json()
+            a.send_json({"type": "dest", "lat": 6.3, "lon": -75.6, "name": "Chilis"})
+            own = a.receive_json()
+            other = b.receive_json()
+            assert own == other
+            assert own["type"] == "dest" and own["rider"] == "ana" and own["name"] == "Chilis"
+
+
+def test_race_se_ecoa_al_emisor():
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana") as a:
+        a.receive_json()
+        with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=beto") as b:
+            b.receive_json()
+            a.send_json({"type": "race", "action": "start", "start_at_ms": 123})
+            own = a.receive_json()
+            other = b.receive_json()
+            assert own == other
+            assert own["type"] == "race" and own["rider"] == "ana" and own["action"] == "start"
+
+
+def test_pos_no_se_ecoa_al_emisor():
+    """receive_json() del test client no soporta timeout y bloquearía para
+    siempre si esperáramos un eco que nunca llega — en cambio, mandamos un
+    `hello` justo después del `pos` y verificamos que lo próximo que le llega
+    a la propia conexión es la respuesta al hello (room_state), no un eco de
+    pos colado antes en la cola."""
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana") as a:
+        a.receive_json()
+        with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=beto") as b:
+            b.receive_json()
+            a.send_json({"lat": 6.2, "lon": -75.5, "speed_kmh": 30.0})
+            msg = b.receive_json()
+            assert msg["rider"] == "ana"
+            a.send_json({"type": "hello", "v": 2})
+            next_on_a = a.receive_json()
+            assert next_on_a["type"] == "room_state"
+
+
+def test_room_state_trae_you():
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana") as a:
+        state = a.receive_json()
+        assert state["you"] == "ana"
+
+
+def test_room_state_you_usa_nombre_con_sufijo_de_duplicado():
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana") as a:
+        a.receive_json()
+        with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=ana") as a2:
+            state = a2.receive_json()
+            assert state["you"] == "ana-2"
+
+
+def test_room_state_you_usa_display_name_de_identidad_autenticada(monkeypatch):
+    async def _fake_get_ws_identity(headers, settings, self_declared_name):
+        return Identity(subject="sub:carlos", display_name="carlos-real")
+
+    monkeypatch.setattr(rooms_module, "get_ws_identity", _fake_get_ws_identity)
+    code = _create_room()
+    with client.websocket_connect(f"/v1/rooms/{code}/ws?rider=impostor") as a:
+        state = a.receive_json()
+        assert state["you"] == "carlos-real"

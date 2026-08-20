@@ -52,8 +52,8 @@ def _unique_rider_name(members: dict, base: str) -> str:
     return f"{base}-{n}"
 
 
-def _room_state_message(room: dict) -> dict:
-    return {"type": "room_state", **room["state"]}
+def _room_state_message(room: dict, you: str) -> dict:
+    return {"type": "room_state", "you": you, **room["state"]}
 
 
 def _projected(payload: dict, fields: tuple) -> dict:
@@ -95,9 +95,12 @@ def _dispatch(rider: str, room: dict, payload: dict) -> dict | None:
     return None
 
 
-async def _broadcast(members: dict, sender: str, message: dict) -> None:
+ECHO_TO_SENDER_TYPES = ("dest", "race")
+
+
+async def _broadcast(members: dict, sender: str, message: dict, include_sender: bool = False) -> None:
     for name, peer in list(members.items()):
-        if name == sender:
+        if name == sender and not include_sender:
             continue
         try:
             await peer.send_json(message)
@@ -146,17 +149,17 @@ async def room_ws(
     rider = _unique_rider_name(members, resolved_rider)
     members[rider] = websocket
     try:
-        await websocket.send_json(_room_state_message(room))
+        await websocket.send_json(_room_state_message(room, rider))
         while True:
             payload = await websocket.receive_json()
             mtype = payload.get("type", "pos")
             if mtype == "hello":
-                await websocket.send_json(_room_state_message(room))
+                await websocket.send_json(_room_state_message(room, rider))
                 continue
             message = _dispatch(rider, room, payload)
             if message is None:
                 continue
-            await _broadcast(members, rider, message)
+            await _broadcast(members, rider, message, include_sender=mtype in ECHO_TO_SENDER_TYPES)
     except WebSocketDisconnect:
         pass
     finally:
